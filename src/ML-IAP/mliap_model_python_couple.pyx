@@ -79,9 +79,15 @@ cdef public int MLIAPPY_load_model(MLIAPModelPython * c_model, char* fname) with
             print("TORCH USING DEVICE: ", device.type, flush=True)
 
             model = torch.load(str_fname, map_location=device, weights_only=False)
+<<<<<<< HEAD
 
             model.device = device
             model.model = model.model.to(device)
+=======
+            model.model.to(device)
+            model.model.eval()
+            #print("model device:", next(model.model.parameters()).device)
+>>>>>>> 260a2fba26 (Removing some printing)
         else:
             with open(str_fname,'rb') as pfile:
                 model = pickle.load(pfile)
