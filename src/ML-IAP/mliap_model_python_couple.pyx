@@ -76,7 +76,10 @@ cdef public int MLIAPPY_load_model(MLIAPModelPython * c_model, char* fname) with
                 device = torch.device("xpu")
             elif torch.mps.is_available():
                 device = torch.device("mps")
+<<<<<<< HEAD
             print("TORCH USING DEVICE: ", device.type, flush=True)
+=======
+>>>>>>> 27bf70b22b (kokkos version working for mtp desc and pyx cython couple)
 
             model = torch.load(str_fname, map_location=device, weights_only=False)
 
