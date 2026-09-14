@@ -27,13 +27,6 @@ MLIAPDescriptorMTPKokkos<DeviceType>::MLIAPDescriptorMTPKokkos(LAMMPS *lmp)
 {}
 
 template <class DeviceType>
-void test_mtp_conversion(MLIAPDescriptorMTPKokkos<DeviceType> *p)
-{
-  auto *m = static_cast<MLIAPDescriptorMTP *>(p);
-  auto *d = static_cast<MLIAPDescriptor *>(m);
-}
-
-template <class DeviceType>
 void MLIAPDescriptorMTPKokkos<DeviceType>::init()
 {
   MLIAPDescriptorMTP::init();

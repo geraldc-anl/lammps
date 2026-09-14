@@ -102,6 +102,7 @@ cdef public int MLIAPPYKokkos_load_model(MLIAPModelPythonKokkosDevice * c_model,
 
             model.device = device
             model.model = model.model.to(device)
+            print("Using device=", device.type)
         else:
             with open(str_fname,'rb') as pfile:
                 model = pickle.load(pfile)
