@@ -21,6 +21,7 @@
 #include "atom_masks.h"
 #include "mliap_data_kokkos.h"
 #include "mliap_descriptor_so3_kokkos.h"
+#include "mliap_descriptor_mtp_kokkos.h"
 #include "mliap_model_linear_kokkos.h"
 #ifdef MLIAP_PYTHON
 #include "mliap_model_python_kokkos.h"
@@ -32,7 +33,7 @@
 #include "kokkos.h"
 #include "pointers.h"
 
-#include "mliap_descriptor_mtp_kokkos.h"
+//#include <nvtx3/nvToolsExt.h>
 
 using namespace LAMMPS_NS;
 
@@ -111,6 +112,7 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
 
   data->generate_neighdata(list, eflag, vflag);
 
+  //nvtxRangePushA("Desc compute");
   // compute descriptors, if needed
   if (model->nonlinearflag || eflag)  {
     k_data->sync(descriptor_space, NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | JATOMS_MASK | PAIR_I_MASK | JELEMS_MASK | RIJ_MASK );
@@ -118,6 +120,7 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
     if (!is_kokkos_descriptor)
       k_data->modified(descriptor_space, DESCRIPTORS_MASK);
   }
+  //nvtxRangePop();
 
   // compute E_i and beta_i = dE_i/dB_i for all i in list
   k_data->sync(model_space, IELEMS_MASK | DESCRIPTORS_MASK);
@@ -130,10 +133,12 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
   comm->forward_comm();
 
 
+  //nvtxRangePushA("Force compute");
   // calculate force contributions beta_i*dB_i/dR_j
   atomKK->sync(descriptor_space,F_MASK);
   k_data->sync(descriptor_space, NUMNEIGHS_MASK | IATOMS_MASK | IELEMS_MASK | ELEMS_MASK | BETAS_MASK | JATOMS_MASK | PAIR_I_MASK | JELEMS_MASK | RIJ_MASK );
   descriptor->compute_forces(data);
+  //nvtxRangePop();
 
   e_tally(data);
 
@@ -203,6 +208,10 @@ void PairMLIAPKokkos<DeviceType>::settings(int narg, char ** arg)
         delete descriptor;
         descriptor = new MLIAPDescriptorSO3Kokkos<DeviceType>(lmp,arg[iarg+2]);
         iarg += 3;
+      } else if (strcmp(arg[iarg+1],"mtp") == 0) {
+	delete descriptor;
+	descriptor = new MLIAPDescriptorMTPKokkos<DeviceType>(lmp);
+	iarg += 2;
       } else
         new_args.push_back(arg[iarg++]);
     } else if (strcmp(arg[iarg], "unified") == 0) {
