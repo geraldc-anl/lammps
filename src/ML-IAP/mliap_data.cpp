@@ -271,9 +271,6 @@ void MLIAPData::grow_neigharrays()
   }
 
   if (nneigh > nneigh_max) {
-    int grow_rows = (natomneigh > natomneigh_max) ? natomneigh : natomneigh_max;
-    int grow_cols = (nneigh > nneigh_max) ? nneigh : nneigh_max;
-    memory->grow(lmp_firstneigh, grow_rows, grow_cols, "MLIAPData:lmp_firstneigh");
     memory->grow(pair_i, nneigh, "MLIAPData:pair_i");
     memory->grow(jatoms, nneigh, "MLIAPData:jatoms");
     memory->grow(jelems, nneigh, "MLIAPData:jelems");
