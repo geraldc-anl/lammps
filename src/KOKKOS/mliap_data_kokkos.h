@@ -150,6 +150,9 @@ public:
     eflag(base.eflag),
     vflag(base.vflag),
     pairmliap(dynamic_cast<PairMLIAPKokkos<LMPDeviceType> *>(base.pairmliap)),
+#if defined(KOKKOS_ENABLE_SYCL)
+    sycl_queue(&LMPDeviceType().sycl_queue()),
+#endif
 #if defined(KOKKOS_ENABLE_CUDA)
     dev(1)
 #else
@@ -210,6 +213,9 @@ public:
   int vflag;
 
   class PairMLIAPKokkos<LMPDeviceType> *pairmliap;    // access to pair tally functions
+
+  // queue reference for intel device
+  void *sycl_queue = nullptr;
 
   int dev;
 

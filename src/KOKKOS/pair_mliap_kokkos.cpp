@@ -203,6 +203,10 @@ void PairMLIAPKokkos<DeviceType>::settings(int narg, char ** arg)
         delete descriptor;
         descriptor = new MLIAPDescriptorSO3Kokkos<DeviceType>(lmp,arg[iarg+2]);
         iarg += 3;
+      } else if (strcmp(arg[iarg+1],"mtp") == 0) {
+        delete descriptor;
+	descriptor = new MLIAPDescriptorMTPKokkos<DeviceType>(lmp);
+	iarg += 2;
       } else
         new_args.push_back(arg[iarg++]);
     } else if (strcmp(arg[iarg], "unified") == 0) {

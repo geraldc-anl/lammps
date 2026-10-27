@@ -22,6 +22,7 @@ try:
     import dpctl
     import dpctl.memory as dpmem
     import dpnp
+    from cpython.pycapsule cimport PyCapsule_New
     mode = "intel"
 except ImportError:
     pass
@@ -53,7 +54,8 @@ cdef extern from "mliap_data_kokkos.h" namespace "LAMMPS_NS":
         # Method to update charges for electrostatic solver
         void update_charges()
 
-        int dev
+        # Reference to sycl queue for intel
+        void * sycl_queue
 
 cdef extern from "mliap_model_python_kokkos.h" namespace "LAMMPS_NS":
     cdef cppclass MLIAPModelPythonKokkosDevice:
@@ -137,38 +139,39 @@ cdef public int MLIAPPYKokkos_nelements(MLIAPModelPythonKokkosDevice * c_model) 
 cdef public int MLIAPPYKokkos_ndescriptors(MLIAPModelPythonKokkosDevice * c_model) with gil:
     return int(retrieve(c_model).n_descriptors)
 
-cdef create_array(device, void *pointer, shape,is_int):
+class _USMArrayInterface:
+    def __init__(self, interface):
+        self.__sycl_usm_array_interface__ = interface
 
+cdef create_array(void *pointer, shape, is_int, q=None):
     size=1
     for i in shape:
         size = size*i
 
-    if ( device == 1) :
-        if (mode == "nvidia"):
-            mem = cupy.cuda.UnownedMemory(ptr=int( <uintptr_t> pointer), owner=None, size=size)
-            memptr = cupy.cuda.MemoryPointer(mem, 0)
-            type=cupy.double
-            if (is_int):
-                type=cupy.int32
-            return cupy.ndarray(shape, type, memptr=memptr)
-        else:
-            q = dpctl.SyclQueue()  # need to get queue Kokkos is using here
-            usm_type = "device"
+    if (mode == "nvidia"):
+        mem = cupy.cuda.UnownedMemory(ptr=int( <uintptr_t> pointer), owner=None, size=size)
+        memptr = cupy.cuda.MemoryPointer(mem, 0)
+        type=cupy.double
+        if (is_int):
+            type=cupy.int32
+        return cupy.ndarray(shape, type, memptr=memptr)
+    elif (mode == "intel"):
+        usm_type = "device"
 
-            # Wrap the raw pointer as unowned USM memory
-            mem = dpmem.as_usm_memory(
-                {
-                    "data": (int(<uintptr_t> pointer), False),
-                    "shape": shape,
-                    "strides": None,
-                    "typestr": "<i4" if is_int else "<f8",
-                    "version": 1,
-                    "syclobj": q,
-                }
-            )
+        # Wrap the raw pointer as unowned USM memory
+        mem = dpmem.as_usm_memory(
+            _USMArrayInterface({
+                "data": (int(<uintptr_t> pointer), True),
+                "shape": shape,
+                "strides": None,
+                "typestr": "<i4" if is_int else "<f8",
+                "version": 1,
+                "syclobj": q,
+            })
+        )
 
-            dtype = dpnp.int32 if is_int else dpnp.float64
-            return dpnp.ndarray(shape, dtype=dtype, buffer=mem)
+        dtype = dpnp.int32 if is_int else dpnp.float64
+        return dpnp.ndarray(shape, dtype=dtype, buffer=mem)
     else:
         if (len(shape) == 1 ):
             if (is_int):
@@ -183,9 +186,6 @@ cdef create_array(device, void *pointer, shape,is_int):
 
 
 cdef public void MLIAPPYKokkos_compute_gradients(MLIAPModelPythonKokkosDevice * c_model, MLIAPDataKokkosDevice * data) with gil:
-
-    dev=data.dev
-
     if (mode == "nvidia"):
         torch.cuda.nvtx.range_push("set data fields")
     model = retrieve(c_model)
@@ -196,19 +196,21 @@ cdef public void MLIAPPYKokkos_compute_gradients(MLIAPModelPythonKokkosDevice * 
     if n_a == 0:
         data.energy[0] = 0.0
         data.update_charges()
-
         if (mode == "nvidia"):
             torch.cuda.nvtx.range_pop()
-
         return
 
+    if (mode == "intel"):
+        q = dpctl.SyclQueue(PyCapsule_New(data.sycl_queue, b"SyclQueueRef", NULL))
+    else:
+        q = None
     # Make arrays from raw Kokkos/device pointers.
-    elem_cp = create_array(dev, data.ielems, (n_a,), True)
-    en_cp   = create_array(dev, data.eatoms, (n_a,), False)
-    beta_cp = create_array(dev, data.betas, (n_a, n_d), False)
-    desc_cp = create_array(dev, data.descriptors, (n_a, n_d), False)
-    charges_cp = create_array(dev, data.charges, (n_a,), False)
-    charge_beta_cp = create_array(dev, data.charge_betas, (n_a, n_d), False)
+    elem_cp = create_array(data.ielems, (n_a,), True, q)
+    en_cp   = create_array(data.eatoms, (n_a,), False, q)
+    beta_cp = create_array(data.betas, (n_a, n_d), False, q)
+    desc_cp = create_array(data.descriptors, (n_a, n_d), False, q)
+    charges_cp = create_array(data.charges, (n_a,), False, q)
+    charge_beta_cp = create_array(data.charge_betas, (n_a, n_d), False, q)
 
     if (mode == "nvidia"):
         torch.cuda.nvtx.range_pop()
@@ -217,7 +219,7 @@ cdef public void MLIAPPYKokkos_compute_gradients(MLIAPModelPythonKokkosDevice * 
     if (mode == "nvidia"):
         torch.cuda.nvtx.range_push("call model")
 
-    model(elem_cp, desc_cp, beta_cp, en_cp, charges_cp, charge_beta_cp) # TODO: ", dev==1"?
+    model(elem_cp, desc_cp, beta_cp, en_cp, charges_cp, charge_beta_cp)
 
     if (mode == "nvidia"):
         torch.cuda.nvtx.range_pop()
