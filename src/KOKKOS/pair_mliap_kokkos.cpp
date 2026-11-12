@@ -32,6 +32,8 @@
 #include "kokkos.h"
 #include "pointers.h"
 
+#include "mliap_descriptor_mtp_kokkos.h"
+
 using namespace LAMMPS_NS;
 
 /* ---------------------------------------------------------------------- */
@@ -97,9 +99,9 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
   }
 
   if (vflag_atom) {
-    if ((int)k_vatom.view_host().extent(0) < maxeatom) {
+    if ((int)k_vatom.view_host().extent(0) < maxvatom) {
       memoryKK->destroy_kokkos(k_vatom,vatom);
-      memoryKK->create_kokkos(k_vatom,vatom,maxeatom,6,"pair:eatom");
+      memoryKK->create_kokkos(k_vatom,vatom,maxvatom,6,"pair:vatom");
     } else {
       Kokkos::deep_copy(k_vatom.template view<DeviceType>(),0);
       k_vatom.modify<DeviceType>();
@@ -124,6 +126,9 @@ void PairMLIAPKokkos<DeviceType>::compute(int eflag, int vflag)
   if (eflag_atom) {
     k_data->modified(model_space, EATOMS_MASK);
   }
+
+  comm->forward_comm();
+
 
   // calculate force contributions beta_i*dB_i/dR_j
   atomKK->sync(descriptor_space,F_MASK);
@@ -198,6 +203,10 @@ void PairMLIAPKokkos<DeviceType>::settings(int narg, char ** arg)
         delete descriptor;
         descriptor = new MLIAPDescriptorSO3Kokkos<DeviceType>(lmp,arg[iarg+2]);
         iarg += 3;
+      } else if (strcmp(arg[iarg+1],"mtp") == 0) {
+        delete descriptor;
+	descriptor = new MLIAPDescriptorMTPKokkos<DeviceType>(lmp);
+	iarg += 2;
       } else
         new_args.push_back(arg[iarg++]);
     } else if (strcmp(arg[iarg], "unified") == 0) {
@@ -355,7 +364,7 @@ int PairMLIAPKokkos<DeviceType>::forward_comm(CommType* copy_from_, CommType* co
   copy_from = copy_from_;
   comm_forward = vec_len=vl;
 
-  Kokkos::parallel_for((atom->nlocal+atom->nghost)*vl, KOKKOS_LAMBDA (int i) {
+  Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType>(0,(atom->nlocal+atom->nghost)*vl), KOKKOS_LAMBDA (int i) {
     copy_to_[i] = copy_from_[i];
   });
   //call comm
@@ -381,14 +390,14 @@ int PairMLIAPKokkos<DeviceType>::reverse_comm(CommType* copy_from_, CommType* co
   copy_from = copy_from_;
   comm_reverse = vec_len = vl;
 
-  Kokkos::parallel_for((atom->nlocal+atom->nghost)*vl, KOKKOS_LAMBDA (int i) {
+  Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType>(0,(atom->nlocal+atom->nghost)*vl), KOKKOS_LAMBDA (int i) {
     copy_to_[i] = copy_from_[i]; // Copy inputs
   });
 
   comm->reverse_comm(this);
 
   Kokkos::parallel_for(
-    Kokkos::RangePolicy<>( (atom->nlocal)*vl,(atom->nlocal + atom->nghost)*vl),
+    Kokkos::RangePolicy<DeviceType>( (atom->nlocal)*vl,(atom->nlocal + atom->nghost)*vl),
     KOKKOS_LAMBDA (int i) {
     copy_to_[i] = 0; //Zero out ghosts
   });
@@ -425,7 +434,7 @@ int PairMLIAPKokkos<DeviceType>::pack_forward_comm_kokkos(
   auto val=fill.view<DeviceType>();
   int nf=vec_len;
   auto to=copy_to;
-  Kokkos::parallel_for(nv*nf, KOKKOS_LAMBDA (int start) {
+  Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType>(0,nv*nf), KOKKOS_LAMBDA (int start) {
       const int i = start/nf;
       const int gstart=idx(i)*nf;
       const int j = start%nf;
@@ -496,7 +505,7 @@ void PairMLIAPKokkos<DeviceType>::unpack_forward_comm_kokkos(
   auto val=fill.view<DeviceType>();
   int nf=vec_len;
   auto to=copy_to;
-  Kokkos::parallel_for(nv*nf, KOKKOS_LAMBDA (int start) {
+  Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType>(0,nv*nf), KOKKOS_LAMBDA (int start) {
       const int i=start/nf;
       const int gstart=(first_up+i)*nf;
       const int j=start%nf;
@@ -559,7 +568,7 @@ int PairMLIAPKokkos<DeviceType>::pack_reverse_comm_kokkos(int nv, int first_up, 
   int nf=vec_len;
   auto val=fill.view<DeviceType>();
   auto to=copy_to;
-  Kokkos::parallel_for(nv*nf, KOKKOS_LAMBDA (int start) {
+  Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType>(0,nv*nf), KOKKOS_LAMBDA (int start) {
       const int i = start/nf;
       const int gstart=(first_up+i)*nf;
       const int j = start%nf;
@@ -627,7 +636,7 @@ void PairMLIAPKokkos<DeviceType>::unpack_reverse_comm_kokkos(int nv, DAT::tdual_
   auto val=fill.view<DeviceType>();
   auto idx=idx_v.view<DeviceType>();
   auto to=copy_to;
-  Kokkos::parallel_for(nv*nf, KOKKOS_LAMBDA (int start) {
+  Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType>(0,nv*nf), KOKKOS_LAMBDA (int start) {
       const int i = start/nf;
       const int gstart=idx(i)*nf;
       const int j=start%nf;
@@ -666,6 +675,25 @@ void PairMLIAPKokkos<DeviceType>::unpack_reverse_comm(int nv, int *idx, double *
       copy_to[gstart++] += static_cast<CommType>(fill[start++]);
   }
 }
+
+template <class DeviceType>
+void PairMLIAPKokkos<DeviceType>::compute_charge_response_forces(
+    typename ArrayTypes<DeviceType>::t_double_1d d_phi)
+{
+  MLIAPDescriptorMTPKokkos<DeviceType> *mtp =
+      dynamic_cast<MLIAPDescriptorMTPKokkos<DeviceType> *>(descriptor);
+
+  if (!mtp) return;
+
+  MLIAPDataKokkos<DeviceType> *k_data = (MLIAPDataKokkos<DeviceType>*)(data);
+
+  mtp->compute_forces_from_coeffs(
+      k_data,
+      k_data->k_charge_betas,
+      d_phi);
+}
+
+
 namespace LAMMPS_NS {
 template class PairMLIAPKokkos<LMPDeviceType>;
 template int PairMLIAPKokkos<LMPDeviceType>::forward_comm<float>(float*,float*,const int);

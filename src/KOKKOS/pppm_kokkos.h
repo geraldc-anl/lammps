@@ -47,6 +47,7 @@ struct TagPPPM_compute_gf_ik{};
 struct TagPPPM_compute_gf_ik_triclinic{};
 struct TagPPPM_self1{};
 struct TagPPPM_self2{};
+struct TagPPPM_self3{};
 struct TagPPPM_brick2fft{};
 struct TagPPPM_particle_map{};
 struct TagPPPM_make_rho_zero{};
@@ -62,6 +63,7 @@ struct TagPPPM_poisson_ik7{};
 struct TagPPPM_poisson_ik8{};
 struct TagPPPM_poisson_ik9{};
 struct TagPPPM_poisson_ik10{};
+struct TagPPPM_poisson_ik11{};
 struct TagPPPM_poisson_ik_triclinic1{};
 struct TagPPPM_poisson_ik_triclinic2{};
 struct TagPPPM_poisson_ik_triclinic3{};
@@ -107,10 +109,13 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   ~PPPMKokkos() override;
   void init() override;
   void setup() override;
+  void reset_grid() override;
   void compute(int, int) override;
   int timing_1d(int, double &) override;
   int timing_3d(int, double &) override;
   double memory_usage() override;
+
+  typename AT::t_double_1d get_phi() const { return d_phi; }
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -151,6 +156,10 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagPPPM_self2, const int&) const;
+
+// NOLINTNEXTLINE
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPPPM_self3, const int&) const;
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -211,6 +220,10 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagPPPM_poisson_ik10, const int&) const;
+
+// NOLINTNEXTLINE
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPPPM_poisson_ik11, const int&) const;
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -411,6 +424,7 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 
   typename FFT_AT::t_FFT_SCALAR_3d d_density_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_vdx_brick,d_vdy_brick,d_vdz_brick;
+  typename FFT_AT::t_FFT_SCALAR_3d d_phi_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_u_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_v0_brick,d_v1_brick,d_v2_brick;
   typename FFT_AT::t_FFT_SCALAR_3d d_v3_brick,d_v4_brick,d_v5_brick;
@@ -422,9 +436,13 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   FFT_DAT::tdual_FFT_SCALAR_1d k_density_fft;
   FFT_DAT::tdual_FFT_SCALAR_1d k_work1;
   FFT_DAT::tdual_FFT_SCALAR_1d k_work2;
+  FFT_DAT::tdual_FFT_SCALAR_1d k_work3;
+  DAT::tdual_double_1d k_phi;
   typename FFT_AT::t_FFT_SCALAR_1d d_density_fft;
   typename FFT_AT::t_FFT_SCALAR_1d d_work1;
   typename FFT_AT::t_FFT_SCALAR_1d d_work2;
+  typename FFT_AT::t_FFT_SCALAR_1d d_work3;
+  typename AT::t_double_1d d_phi;
 
   DAT::tdual_double_1d k_gf_b;
   typename AT::t_double_1d d_gf_b;
@@ -439,7 +457,7 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
 
   // FFTs and grid communication
 
-  FFT3dKokkos<DeviceType> *fft1,*fft2;
+  FFT3dKokkos<DeviceType> *fft1,*fft2,*fft_phi;
   RemapKokkos<DeviceType> *remap;
   Grid3dKokkos<DeviceType> *gc;
 
@@ -461,6 +479,8 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
   double estimate_ik_error(double, double, bigint) override;
   void compute_gf_denom() override;
   void compute_gf_ik() override;
+
+  void qsum_qsq(int warning_flag = 1) override;
 
   void particle_map() override;
   void make_rho() override;
@@ -521,6 +541,73 @@ class PPPMKokkos : public PPPM, public KokkosBaseFFT {
     return s*s;
   };
 };
+
+/* ----------------------------------------------------------------------
+   Inline definitions of base-class device functions that are reused by
+   the pppm/tip4p/kk subclass, which lives in a separate source file.
+   Their definitions must be visible in the header so the subclass can
+   launch/call them on the device (a GPU build cannot resolve them across
+   compilation units without relocatable device code).  See
+   pppm_tip4p_kokkos.cpp.
+------------------------------------------------------------------------- */
+
+template<class DeviceType>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void PPPMKokkos<DeviceType>::operator()(TagPPPM_make_rho_zero, const int &ii) const
+{
+  int iz = ii/(numy_out*numx_out);
+  int iy = (ii - iz*numy_out*numx_out) / numx_out;
+  int ix = ii - iz*numy_out*numx_out - iy*numx_out;
+  d_density_brick(iz,iy,ix) = 0;
+}
+
+/* ----------------------------------------------------------------------
+   charge assignment into rho1d
+   dx,dy,dz = distance of particle from "lower left" grid point
+------------------------------------------------------------------------- */
+
+template<class DeviceType>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void PPPMKokkos<DeviceType>::compute_rho1d(const int i, const FFT_SCALAR &dx, const FFT_SCALAR &dy,
+                         const FFT_SCALAR &dz) const
+{
+  int k,l;
+  FFT_SCALAR r1,r2,r3;
+
+  for (k = (1-order)/2; k <= order/2; k++) {
+    r1 = r2 = r3 = 0;
+
+    for (l = order-1; l >= 0; l--) {
+      r1 = d_rho_coeff(l,k-(1-order)/2) + r1*dx;
+      r2 = d_rho_coeff(l,k-(1-order)/2) + r2*dy;
+      r3 = d_rho_coeff(l,k-(1-order)/2) + r3*dz;
+    }
+    d_rho1d(i,k+order/2,0) = r1;
+    d_rho1d(i,k+order/2,1) = r2;
+    d_rho1d(i,k+order/2,2) = r3;
+  }
+}
+
+template<class DeviceType>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void PPPMKokkos<DeviceType>::operator()(TagPPPM_slabcorr2, const int &i, double &dipole_r2) const
+{
+  dipole_r2 += static_cast<double>(q[i]*x(i,2)*x(i,2));
+}
+
+template<class DeviceType>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void PPPMKokkos<DeviceType>::operator()(TagPPPM_slabcorr3, const int &i) const
+{
+  double z_i = static_cast<double>(x(i,2));
+  double q_i = static_cast<double>(q[i]);
+  d_eatom[i] += static_cast<KK_ACC_FLOAT>(efact * q_i*(z_i*dipole_all - 0.5*(dipole_r2 +
+    qsum*z_i*z_i) - qsum*zprd_slab*zprd_slab/12.0));
+}
 
 }
 
